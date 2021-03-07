@@ -1,5 +1,8 @@
-use std::thread::{self, JoinHandle};
 use std::future::Future;
+use std::io::{self, Read};
+use std::str;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use futures::FutureExt;
 use futures::channel::oneshot;
@@ -8,6 +11,8 @@ use log::{trace, debug, info, warn};
 use serialport::{SerialPort, ClearBuffer};
 use thiserror::Error;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+const RESPONSE_WAIT_PERIOD: Duration = Duration::from_millis(100);
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -28,11 +33,26 @@ pub enum Error {
     source: serialport::Error
   },
 
-  #[error("error writing command to serial port: {}", source)]
-  SerialWriteError {
+  #[error("error communicating via serial port: {}", source)]
+  SerialIOError {
     #[from]
     source: std::io::Error
-  }
+  },
+
+  #[error("projector did not send expected preamble response")]
+  CommandSendInvalidState,
+
+  #[error("response contained invalid data: source")]
+  ResponseInvalidString {
+    #[from]
+    source: str::Utf8Error
+  },
+
+  #[error("response did not match expected format: {:?}", 0)]
+  ResponseUnexpectedFormat(String),
+
+  #[error("projector returned an error ('Block item')")]
+  ResponseBlockItem
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -58,6 +78,12 @@ impl From<&str> for Command {
 impl From<(&str, &str)> for Command {
   fn from(tup: (&str, &str)) -> Self {
     Command::Set((tup.0.to_string(), tup.1.to_string()))
+  }
+}
+
+impl From<(&str, String)> for Command {
+  fn from(tup: (&str, String)) -> Self {
+    Command::Set((tup.0.to_string(), tup.1))
   }
 }
 
@@ -89,6 +115,16 @@ impl ProjectorControl {
     ProjectorControl { cmd_tx, cmd_join }
   }
 
+  /// Submits a command for future processing.
+  ///
+  /// The response, if any, will be available by `.await`-ing on the returned
+  /// future. The actual command execution takes place on a background thread
+  /// upon which commands are executed in the order they are received (at
+  /// roughly 100ms intervals).
+  ///
+  /// Note that this function does have immediate side-effects as the command
+  /// will be queued immediately rather than when `.await` is called on the
+  /// returned future.
   pub fn submit_command(&self, command: impl Into<Command>) -> BoxFuture<CommandResult> {
     let command = command.into();
     let (tx, rx) = oneshot::channel::<CommandResult>();
@@ -141,28 +177,83 @@ impl ProjectorControl {
   }
 }
 
+fn read_response(port: &mut Box<dyn SerialPort>, command: &str) -> Result<Option<String>> {
+  let mut response: Vec<u8> = Vec::with_capacity(64);
+  let mut buf: Vec<u8> = vec![0; 32];
+
+  let instant = Instant::now();
+  while instant.elapsed() < RESPONSE_WAIT_PERIOD {
+    match port.read(buf.as_mut_slice()) {
+      Ok(n) => response.extend_from_slice(&buf[..n]),
+
+      // keep trying until the time has elapsed
+      Err(ref e) if e.kind() == io::ErrorKind::TimedOut => (),
+
+      // bubble up all other errors
+      Err(e) => return Err(Error::SerialIOError { source: e })
+    }
+  }
+
+  let response = str::from_utf8(&response)?;
+  trace!("full response: {:?}", response);
+
+  // the device seems to echo characters, so expect the first line to be what we
+  // just sent and strip it off
+  if !response.starts_with(command) {
+    return Err(Error::ResponseUnexpectedFormat(response.to_string()));
+  }
+
+  let response = &response[command.len()..].trim();
+  if response.is_empty() {
+    Ok(None)
+  } else if response.starts_with('*') && response.ends_with('#') {
+    let truncated = &response[1..response.len() - 1];
+    if truncated.to_ascii_lowercase() == "block item" {
+      Err(Error::ResponseBlockItem)
+    } else {
+      Ok(Some(truncated.to_string()))
+    }
+  } else {
+    Err(Error::ResponseUnexpectedFormat(response.to_string()))
+  }
+}
+
 fn send_get(port: &mut Box<dyn SerialPort>, key: &str) -> CommandResult {
-  port.clear(ClearBuffer::Input)?;  
+  port.clear(ClearBuffer::All)?;
+  port.write_all(b"\r")?;
 
-  let cmd = format!("\r*{}=?#\r", key);
-  trace!("send_get: {:?}", cmd);
-  write!(port, "{}", cmd)?;
+  let mut buf: [u8; 1] = [0; 1];
+  port.read_exact(&mut buf)?;
+  trace!("send_get: prompt buf: {:?}", str::from_utf8(&buf));
 
-  // TODO: need to read and parse the response
+  if buf[0] as char != '>' {
+    return Err(Error::CommandSendInvalidState);
+  }
 
-  thread::sleep(std::time::Duration::from_millis(3000));
+  let command = format!("*{}=?#\r", key);
+  port.write_all(command.as_bytes())?;
+  trace!("send_get: wrote query: {:?}", command);
 
-
-  Ok(Some("on".into()))
+  read_response(port, &command)
 }
 
 fn send_set(port: &mut Box<dyn SerialPort>, key: &str, value: &str) -> CommandResult {
-  let cmd = format!("\r*{}={}#\r", key, value);
-  trace!("send_get: {:?}", cmd);
-  write!(port, "{}", cmd)?;
-  thread::sleep(std::time::Duration::from_millis(3000));
+  port.clear(ClearBuffer::Input)?;
 
-  Ok(None)
+  port.write_all(b"\r")?;
+
+  let mut buf: [u8; 1] = [0; 1];
+  port.read_exact(&mut buf)?;
+  trace!("send_set: prompt buf: {:?}", str::from_utf8(&buf));
+  if buf[0] != b'>' {
+    return Err(Error::CommandSendInvalidState);
+  }
+
+  let command = format!("*{}={}#\r", key, value);
+  port.write_all(command.as_bytes())?;
+  trace!("send_set: wrote command: {:?}", command);
+
+  read_response(port, &command)
 }
 
 fn spawn_command_thread(
