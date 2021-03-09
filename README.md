@@ -44,3 +44,20 @@ cross build --target-dir $(pwd)/target-cross --target=arm-unknown-linux-gnueabi 
 both `cargo build` and `cross build`)
 
 [`cross`]: https://github.com/rust-embedded/cross
+
+## FAQs
+
+### I sent a command shortly after powering on the projector and commands stopped working. What gives?
+
+Sending commands while the projector is changing power states occasionally
+crashes the projector's serial interface. You'll need to physically unplug the
+projector to fix this.
+
+The library attempts to work around this by pausing command processing when
+power states are changed, but if the projector is powered on or off externally
+(e.g. via the power button) crashes can still occur.
+
+Library users can submit `Command::Sleep()` commands to delay the processing
+thread if they notice the projector's power state has changed. Usually a single
+power query command (`pow=?`) is safe so long as you don't send further
+commands, however it may error ("Block item").

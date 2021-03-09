@@ -12,7 +12,7 @@ use serialport::{SerialPort, ClearBuffer};
 use thiserror::Error;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-const RESPONSE_WAIT_PERIOD: Duration = Duration::from_millis(100);
+const RESPONSE_WAIT_PERIOD: Duration = Duration::from_millis(200);
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -66,7 +66,20 @@ pub enum Command {
   Get(String),
 
   /// A setter command changes the projector's state
-  Set((String, String))
+  Set((String, String)),
+
+  /// A special command to sleep the processing thread.
+  ///
+  /// This is intended to work around potential serial interface crashes when
+  /// sending commands while the projector is transitioning between power
+  /// states. Clients can send this sleep command to temporarily block the
+  /// processing thread if they notice (via their own `pow=?` commands) that the
+  /// projector has transitioned states via external means (i.e. user pressing
+  /// the power button).
+  ///
+  /// Note that the processing thread already includes a safety wait when state
+  /// transitions are requested via this library.
+  Sleep(Duration),
 }
 
 impl From<&str> for Command {
@@ -86,13 +99,6 @@ impl From<(&str, String)> for Command {
     Command::Set((tup.0.to_string(), tup.1))
   }
 }
-
-// pub enum CommandResult {
-//   Pending,
-//   Err(Error),
-//   OkGet,
-//   OkSet(String)
-//}
 
 pub type CommandResult = Result<Option<String>>;
 
@@ -253,6 +259,23 @@ fn send_set(port: &mut Box<dyn SerialPort>, key: &str, value: &str) -> CommandRe
   port.write_all(command.as_bytes())?;
   trace!("send_set: wrote command: {:?}", command);
 
+  // hack: sending commands too quickly after powering on crashes the serial
+  // interface, so block the processing thread for a bit
+  // note that this does nothing to protect us if we accidentally send commands
+  // after the user presses buttons on the projector - we'll need to rely on
+  //
+  if &key.to_ascii_lowercase() == "pow" {
+    // the projector takes longer to turn off than on
+    let secs = if value.to_ascii_lowercase() == "off" {
+      60
+    } else {
+      30
+    };
+
+    debug!("waiting {}s after changing power state to {}", secs, value);
+    thread::sleep(Duration::from_secs(secs));
+  }
+
   read_response(port, &command)
 }
 
@@ -268,14 +291,19 @@ fn spawn_command_thread(
         Command::Get(key) => send_get(&mut port, key),
         Command::Set((key, value)) => send_set(&mut port, key, value),
         Command::Stop => Ok(None),
+        Command::Sleep(d) => {
+          thread::sleep(*d);
+          Ok(None)
+        }
       };
 
       debug!("command {:?} result: {:?}", &cmd.command, &result);
 
       if let Err(e) = cmd.tx.send(result) {
         // we can't do much if this fails, but dropping it normally after this
-        // iteration will at least raise Cancelled on the other end
-        warn!("command ({:?}) send failed: {:?}", &cmd.command, e);
+        // iteration will at least raise Cancelled on the other end (though the
+        // other end probably no longer exists)
+        debug!("command ({:?}) response send failed: {:?}", &cmd.command, e);
       }
 
       if let Command::Stop = &cmd.command {

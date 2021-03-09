@@ -3,7 +3,7 @@ use std::fmt;
 use std::time::Duration;
 
 use benq_control::{ProjectorControl, Command};
-use color_eyre::eyre::{Result, Error, Context, eyre};
+use color_eyre::eyre::{Result, Context, eyre};
 use log::*;
 use structopt::StructOpt;
 
