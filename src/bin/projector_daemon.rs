@@ -32,10 +32,6 @@ struct Options {
   )]
   baud_rate: u32,
 
-  // /// HTTP server port
-  //#[structopt(long, short, default_value = "8084", env = "PROJECTOR_PORT")]
-  //port: u16,
-
   /// port and protocol to listen on
   #[structopt(
     long, short,
