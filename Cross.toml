@@ -1,0 +1,10 @@
+[target.arm-unknown-linux-gnueabihf]
+image = "timothyb89/cross-avahi-arm-unknown-linux-gnueabihf"
+
+[build.env]
+passthrough = [
+    "RUST_BACKTRACE",
+    "RUST_LOG",
+    "TRAVIS",
+    "RUSTFLAGS",
+]

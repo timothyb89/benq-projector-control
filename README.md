@@ -24,7 +24,6 @@ utilities were designed with this projector in mind and so all options may not
 be compatible, however it can still execute arbitrary commands with
 `projector-tool exec ...`. Refer to the user manual for a full list.
 
-
 ## Building
 
 To build all binaries, install the Rust toolchain (see https://rustup.rs) and
@@ -34,16 +33,26 @@ run:
 cargo build --bins --all-features --release
 ```
 
-[`cross`] is recommended for cross-compiling. To build for all Raspberry Pi
+[`cross`] is recommended for cross-compiling. To build for most Raspberry Pi
 models, run:
 ```bash
-cross build --target-dir $(pwd)/target-cross --target=arm-unknown-linux-gnueabi --all-features --bins --release
+RUSTFLAGS='-C link-args=-Wl,-rpath-link,/usr/lib/arm-linux-gnueabihf,-rpath-link,/lib/arm-linux-gnueabihf/' cross build --target-dir $(pwd)/target-cross --target=arm-unknown-linux-gnueabihf --all-features --bins --release
 ```
+
+(note: only gnueabihf is supported when building via this method as it requires
+libavahi which is not available in the gnueabi (non-hf) build images)
 
 (note: `--target-dir` is recommended to prevent spurious rebuilds when using
 both `cargo build` and `cross build`)
 
 [`cross`]: https://github.com/rust-embedded/cross
+
+## Home Assistant integration
+
+A Home Assistant integration can be found in the
+[`./benq_control`](./benq_control) directory allowing you to control most
+projector functions through Home Assistant and its connected apps, including
+Google Home, etc.
 
 ## FAQs
 

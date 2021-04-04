@@ -110,15 +110,14 @@ struct SubmittedCommand {
 
 pub struct ProjectorControl {
   cmd_tx: UnboundedSender<SubmittedCommand>,
-  cmd_join: JoinHandle<()>,
 }
 
 impl ProjectorControl {
   pub fn new(port: Box<dyn SerialPort>) -> ProjectorControl {
     let (cmd_tx, cmd_rx) = unbounded_channel();
-    let cmd_join = spawn_command_thread(port, cmd_rx);
+    spawn_command_thread(port, cmd_rx);
 
-    ProjectorControl { cmd_tx, cmd_join }
+    ProjectorControl { cmd_tx }
   }
 
   /// Submits a command for future processing.
@@ -259,23 +258,6 @@ fn send_set(port: &mut Box<dyn SerialPort>, key: &str, value: &str) -> CommandRe
   port.write_all(command.as_bytes())?;
   trace!("send_set: wrote command: {:?}", command);
 
-  // hack: sending commands too quickly after powering on crashes the serial
-  // interface, so block the processing thread for a bit
-  // note that this does nothing to protect us if we accidentally send commands
-  // after the user presses buttons on the projector - we'll need to rely on
-  //
-  if &key.to_ascii_lowercase() == "pow" {
-    // the projector takes longer to turn off than on
-    let secs = if value.to_ascii_lowercase() == "off" {
-      60
-    } else {
-      30
-    };
-
-    debug!("waiting {}s after changing power state to {}", secs, value);
-    thread::sleep(Duration::from_secs(secs));
-  }
-
   read_response(port, &command)
 }
 
@@ -309,6 +291,30 @@ fn spawn_command_thread(
       if let Command::Stop = &cmd.command {
         break;
       }
+
+      // wait a bit between commands for safety
+      let delay_millis = match cmd.command {
+        Command::Set((k, v)) => {
+          if k.to_ascii_lowercase() == "pow" {
+            if v.to_ascii_lowercase() == "off" {
+              // power off takes longer
+              60_000
+            } else {
+              30_000
+            }
+          } else {
+            500
+          }
+        },
+        _ => 1
+      };
+
+      // hack: sending commands too quickly after powering on crashes the serial
+      // interface, so block the processing thread for a bit
+      // note that this does nothing to protect us if we accidentally send commands
+      // after the user presses buttons on the projector - we'll need to rely on
+      trace!("waiting {}ms after command", delay_millis);
+      thread::sleep(Duration::from_millis(delay_millis));
     }
   })
 }
