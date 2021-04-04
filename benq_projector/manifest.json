@@ -1,0 +1,16 @@
+{
+  "domain": "benq_projector",
+  "name": "BenQ Projector",
+  "config_flow": true,
+  "documentation": "https://github.com/timothyb89/benq-projector-control",
+  "issue_tracker": "https://github.com/timothyb89/benq-projector-control/issues",
+  "requirements": [],
+  "ssdp": [],
+  "zeroconf": ["_benq_projector._tcp.local."],
+  "quality_scale": "gold",
+  "homekit": {},
+  "dependencies": [],
+  "codeowners": [
+    "@timothyb89"
+  ]
+}
